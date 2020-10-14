@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+bayes_model_fit.RData
+cv_results.RData
+marketing_data.RData
+scenarios.RData

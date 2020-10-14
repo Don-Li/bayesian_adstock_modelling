@@ -1,0 +1,636 @@
+---
+title: "Bayesian Adstock modelling"
+author: "Don Li"
+date: "13/09/2020"
+output:
+  html_document: default
+  pdf_document: default
+  code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library( data.table )
+load( "marketing_data.RData" )
+
+plot_PV = function( marketing, log = FALSE, main = NULL, legendpos = NULL,
+    ylim = NULL ){
+    if ( is.null( main ) ){
+        main = "Daily page views"
+    }
+    if ( log == FALSE ){
+        get_this = "PV"
+        ylab = "Page views (daily)"
+    } else{
+        get_this = "log_PV"
+        ylab = "log page views (daily)"
+    }
+    
+    if ( is.null(ylim) ){
+        ylim = c(NULL, NULL)
+    }
+    marketing[ , {
+        plot( date, get(get_this), type = "o", main = main,
+            xlab = "Date", ylab = ylab, xaxt = "n", ylim = ylim)
+        abline( v = date[ Rock.Ads >= 1 ], col = rgb(1,0,0,0.1) )
+        abline( v = date[ Rlive.Ads >= 1 ], col = rgb(0,1,0,0.1) )
+        axis.Date( 1, 
+            at = seq( min( marketing$date ), max( marketing$date ), by = "1 mon" ) )
+    } ]
+    
+    if ( is.null( legendpos ) ){
+        if ( log == FALSE ){
+            legendpos = "topleft"
+        } else{
+            legendpos = "topright"
+        }
+    }
+    legend( x = legendpos, legend = c("The Rock", "Radio Live"),
+        col = c("red", "green"), lty = 1, bty = "n" )
+}
+
+grep_names = function( x, pattern ){
+    names(x)[ grepl( pattern, names(x) ) ]
+}
+
+credible_interval_polygon1 = function( dates, bayes_quants ){
+    polygon(
+        x = c( dates, rev(dates) ),
+        y = c( bayes_quants[1,], rev(bayes_quants[2,] ) ),
+        col = rgb(0, 0, 1, 0.1),
+        border = rgb(0, 0, 1, 0.1)
+    )
+}
+
+bayes_get_pred = function( mcmc_stuff, var_names ){
+    x = mcmc_stuff[ , {
+        mget( names(mcmc_stuff)[ grepl( var_names, names(mcmc_stuff) ) ] ) 
+    } ]
+    
+    apply( x, 2, function(x){
+        if ( all( is.na(x) ) ) return( rep(NaN,3) )
+        quantile( x, probs = c(0.1, 0.5, 0.9) ) 
+    } )
+}
+```
+
+# Executive Summary
+
+An engineering company has been advertising their company on `Radio Live` and `The Rock` radio stations. We want to know whether these advertising campaigns has an effect on the number of page views for their recruitment website. 
+
+The figure below shows the daily page views over time. The vertical lines mark dates where advertisements were played on `The Rock` or `Radio Live`.
+
+```{r echo=FALSE}
+par( mfrow = c(1,1) )
+plot_PV( marketing )
+```
+
+## The effect of advertising
+
+The figure below shows our uncertainty in the effect of advertising on `The Rock` and `Radio Live`. We see that advertising on `The Rock` was associated with higher page views. However, `Radio Live` tended to have no effect or an effect close to zero. We also have high certainty that the effect of advertising on `The Rock` has a greater effect than advertising on `Radio Live`.
+
+```{r echo=FALSE}
+load( "bayes_model_fit.RData" )
+
+ad_effect_names = c("rock_effect", "rlive_effect")
+advertising_effects = bayes_model_fit[ , mget( ad_effect_names ) ]
+ad_names = c("The Rock", "Radio Live")
+names(ad_names) = ad_effect_names
+
+advertising_effects2 = melt( advertising_effects, measure.vars = ad_effect_names )
+advertising_effects2[ , variable := factor( ad_names[variable], levels = ad_names ) ]
+advertising_effects2[ , value := exp(value) ]
+
+hist( advertising_effects2[ variable == "Radio Live" ]$value, 
+    breaks = seq(0, 0.5, by = 0.01), col = rgb(0, 0, 1, 0.15),
+    prob = T,
+    main = "Advertising effect distribution", 
+    xlab = "Advertising effect (higher is better)")
+hist( advertising_effects2[ variable == "The Rock" ]$value, 
+    breaks = seq(0, 0.5, by = 0.01), col = rgb(1, 0, 0, 0.15),
+    prob = T, add = T )
+legend( x = "topright", legend = c("The Rock", "Radio Live"),
+    col = c("red", "blue"), bty = "n", fill = c("red", "blue") )
+```
+
+## Advertising decay
+
+The figure below shows uncertainty about how much of the advertising effect decays per day. The effects of advertisements on `Radio Live` tended not to persist for very long. However, the effects of advertisements on `The Rock` tended to persist for longer.
+
+```{r echo=FALSE}
+decay_names = c("decay_rlive", "decay_rock")
+decay_effects = bayes_model_fit[ , mget( decay_names ) ]
+ad_names = c("Radio Live", "The Rock")
+names(ad_names) = decay_effects
+
+decay_effects2 = melt( decay_effects, measure.vars = decay_names )
+decay_effects2[ , variable := factor( ad_names[variable], levels = ad_names ) ]
+
+hist( decay_effects2[ variable == "Radio Live" ]$value, 
+    breaks = seq(0, 1, by = 0.01), col = rgb(0, 0, 1, 0.15),
+    prob = T,
+    main = "Advertising decay distribution", 
+    xlab = "Advertising decay (Lower is longer-lasting)",
+    ylim = c(0, 10) )
+hist( decay_effects2[ variable == "The Rock" ]$value, 
+    breaks = seq(0, 1, by = 0.01), col = rgb(1, 0, 0, 0.15),
+    prob = T, add = T )
+legend( x = "topright", legend = c("The Rock", "Radio Live"),
+    col = c("red", "blue"), bty = "n", fill = c("red", "blue") )
+```
+
+## Effect of the day
+
+The figure below shows the uncertainty in the effect of the day on page views compared to Sunday. We have relatively high certainty that page views are higher during the weekday than on Sunday. In addition, page views on Saturday tended to be similar or less than Sunday. We also have indication that the advertising (on The Rock) is more effective on weekdays than the weekend (see end of technical summary for more details).
+
+```{r echo=FALSE}
+weekday_beta_names = grep_names( bayes_model_fit, "week" )
+day_names = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+names(day_names) = weekday_beta_names
+weekday_betas = bayes_model_fit[ , mget(grep_names( bayes_model_fit, "week" )) ]
+
+weekday_betas2 = melt( weekday_betas, measure.vars = weekday_beta_names )
+weekday_betas2[ , variable := factor( day_names[variable], levels = day_names ) ]
+
+boxplot( value ~ variable, weekday_betas2,
+    main = "Effect of day on page views",
+    xlab = "Day", ylab = "Day effect (higher is better)") 
+```
+
+## Effect of working holidays
+
+The figure below shows uncertainty in the change in page views during a working holiday. During a working holiday, the page views were around 50% less than during a working day.
+
+```{r echo=FALSE}
+holiday_effect = bayes_model_fit[ , mget( "holiday_beta" ) ]
+hist( exp( holiday_effect$holiday_beta ), prob = T,
+    main = "Effect of advertising on a holiday",
+    xlab = "Proportion change in page views")
+```
+
+\newpage
+## Forecast
+
+We will also show some model predictions and forecast for different scenarios, to aid in decision making about future advertising campaigns. 
+
+The figure below shows the fit of our model to the historical page views data. The blue ribbon shows an 80% prediction interval and the blue line shows the median prediction. In regions where there was no advertising, the model does not predict very well. That is, model tended to under-predict the spikes in page views in December but over-predict mid-March. A strong possibility is that there could be seasonal effects where late December is common for people to look for new jobs and March is less common. However, we cannot assess this claim without annual data.
+
+```{r echo=FALSE}
+bayes_all_data_predict = bayes_get_pred( bayes_model_fit, "PV_pred")
+marketing[ -1, c("pred_low", "pred_median", "pred_high") := {
+    as.data.table( t( exp(bayes_all_data_predict) ) )
+} ]
+marketing[ , {
+    plot_PV( .SD, ylim = c(0, 6000) )
+    lines( date, pred_median, col = "blue" )
+    credible_interval_polygon1( date, rbind(pred_low, pred_high) )
+} ]
+```
+
+```{r include=FALSE}
+load( "scenarios.RData" )
+```
+
+\newpage
+In the zeroth forecast scenario, we predict page views with no more advertising campaigns. In the figure below, our forecast shows that page views will fluctuate due to daily effects.
+
+```{r echo=FALSE}
+bayes_all_data_predict0 = bayes_get_pred( scenario0_fit, "PV_pred")
+marketing_predict_scenario[ -1, c("pred_low", "pred_median", "pred_high") := {
+    as.data.table( t( exp(bayes_all_data_predict0) ) )
+} ]
+
+marketing_predict_scenario[ , {
+    plot_PV( .SD, ylim = c(0, 6000), 
+        main = "Forecast scenario 0: \nNo advertising" )
+    lines( date, pred_median, col = "blue" )
+    credible_interval_polygon1( date, rbind(pred_low, pred_high) )
+} ]
+```
+
+\newpage
+
+In the first forecast scenario, we predict page views with weekday advertising on `The Rock`. In the figure below, we forecast increased page views due to advertising on The Rock with daily effects.
+
+```{r echo=FALSE}
+bayes_all_data_predict1 = bayes_get_pred( scenario1_fit, "PV_pred")
+marketing_predict_scenario1[ -1, c("pred_low", "pred_median", "pred_high") := {
+    as.data.table( t( exp(bayes_all_data_predict1) ) )
+} ]
+
+marketing_predict_scenario1[ , {
+    plot_PV( .SD, ylim = c(0, 6000),
+        main = "Forecast scenario 1: \nWeekday advertising on The Rock")
+    lines( date, pred_median, col = "blue" )
+    credible_interval_polygon1( date, rbind(pred_low, pred_high) )
+} ]
+```
+
+\newpage
+
+In the second forecast scenario, we predict page views with weekday advertising on Radio Live. In the figure below, the forecasts show that the changes in page view are not much different from when there was no advertising, and the fluctuations in page views are due almost entirely to daily effects.
+
+```{r echo=FALSE}
+bayes_all_data_predict2 = bayes_get_pred( scenario2_fit, "PV_pred")
+marketing_predict_scenario2[ -1, c("pred_low", "pred_median", "pred_high") := {
+    as.data.table( t( exp(bayes_all_data_predict2) ) )
+} ]
+
+marketing_predict_scenario2[ , {
+    plot_PV( .SD, ylim = c(0, 6000),
+        main = "Forecast scenario 2: \nWeekday advertising on Radio Live")
+    lines( date, pred_median, col = "blue" )
+    credible_interval_polygon1( date, rbind(pred_low, pred_high) )
+} ]
+```
+
+\newpage
+
+
+# Conclusions
+
+Page views are higher on weekdays than weekends and on working days than public holidays. We have high certainty for this conclusion.
+
+Advertising on `The Rock` increased page view, while advertising on` Radio Live` appeared to have little or no effect. We have extremely high certainty for this conclusion.
+
+The effect of advertising tends not to persist for very long. For `Radio Live`, any (small) advertising effect only lasted around one day. For advertisements on `The Rock`, advertising effects lost 80% of their effectiveness per day. 
+
+Advertising (on `The Rock`) during the weekday was more effective than on the weekend (see end of technical appendix for more details). 
+
+To increase page views on a constrained budget, our forecasts suggest that we should advertise on `The Rock` exclusively. Combined with our analyses, it is strongly suggested that this should be on weekdays too. It is possible that other schedules for advertising could be more efficient, such as Monday, Wednesday, and Thursday, in accordance with the daily effects. But this can be investigated later.
+
+It is also possible that there is annual seasonality in the page views, driven by seasonality in job searching. We can improve our forecast model by obtaining additional data on this annual seasonality.
+
+\newpage
+
+
+# Technical Appendix
+
+We begin by examining our domain knowledge about advertising. In this dataset, we have page views as a function of time. 
+
+## Adstock
+
+Advertising is a spike process in time, but its effects could be distributed across time following the event. In other words, an advertisement today could affect customer behaviour tomorrow. Therefore, our first consideration is an `adstock` model where the effect of advertising is exponentially smoothed over time.
+
+The `adstock` model generates a new covariate `adstock`, which is a geometrically weighted smoother, $adstock_i = (1-\rho) adstock_{i-1} + \rho A_i$, where $A_i$ is an advertising event (e.g., number of advertisements per day for daily data and $\rho$ is a decay rate. 
+
+## Transformations
+
+Inspection of the raw page views shows that the page views are right-skewed. If we fit a local smoother to the average across time, the residuals would also be right skewed. At this point, we can consider using a transformation to improve symmetry of the data, or a generalised linear model, such as a Poisson or negative-Binomial model on the raw page views.
+
+I have chosen here to log the data. On inspection of the log page views, a mean-smoother appears to have relatively symmetrical residuals. I did not bother with a formal test because these conclusions are fairly evident from visual inspection.
+
+```{r echo=FALSE, fig.height=10, fig.width=7}
+par( mfrow = c(2,1 ) )
+plot_PV( marketing )
+plot_PV( marketing, log = TRUE )
+```
+
+## Exploratory analysis
+
+### Advertising effect
+
+One of our prime directives is to investigate the effect of advertising. To get an expectation for the direction and size of the effects, we can look at the relationship between the number of advertisements and the log page views on that day.
+
+It appears that running ads on `The Rock` were associated with an increase in the log page views. Note that six ads were run on the weekends between 19-01-2008 and 03-02-2008. So, the apparent decrease in page views from five to six ads may be an artifact of only running ads on the weekends.
+
+It does not appear that running ads on Radio Live has an effect on the page views.
+
+```{r echo=FALSE}
+par( mfrow = c(1,2 ) )
+boxplot( log_PV ~ Rock.Ads, data = marketing,
+    main = "Day page views and ads on The Rock",
+    ylab = "Log page views (daily)",
+    xlab = "Number of ads on The Rock")
+
+boxplot( log_PV ~ Rlive.Ads, data = marketing,
+    main = "Day page views and ads on Radio Live",
+    ylab = "Log page views (daily)",
+    xlab = "Number of ads on Radio Live" )
+
+```
+
+Another view, of the data with the days that advertisements were run overlaid on the time series, shows that page views tended to be higher when advertisements were run on `The Rock` than when advertisements were run on `Radio Live`.
+
+```{r echo=FALSE}
+par( mfrow = c(1,1))
+plot_PV( marketing, log = T )
+```
+
+### Day effects
+
+The plot below shows the distribution of log page views by each day. Weekends seem worse than the working weekdays. Tuesday and Friday seem a bit lower than the other workdays. Therefore, it seems reasonable to put a weekday factor into our models.
+
+```{r echo=FALSE}
+boxplot( log_PV ~ weekday, data = marketing )
+```
+
+### Work holidays
+
+If weekends have an effect on page views, then it is reasonable to assume that working holidays will also have an effect. Holiday information was obtained from `https://www.timeanddate.com/holidays/new-zealand/2008`. All holidays that were classified as `National holiday` or local holidays for Auckland and Wellington were coded as working holidays. The reason for local holidays from Auckland and Wellington is because their populations are large enough that a local holiday should have an effect on page views.
+
+In addition, I also set the week starting before Christmas and the week ending New Years as working holidays. This was based on inspection of the time series.
+
+The plot below shows the distribution of log page views for holiday or not holiday.
+
+```{r echo=FALSE}
+boxplot( log_PV ~ holiday, data = marketing,
+    main = "Daily page views for holiday/not holiday",
+    ylab = "Log daily page views",
+    xlab = "Holiday (0 = not a holiday)")
+```
+
+
+### Time trends
+
+From inspection of the overall time series, there may be some time effects. At a very coarse level, page views may be decreasing over time. So, it may be worthwhile to add a time variable to the model.
+
+As a side note, I did try using a state-space model. However, the process variation appeared to be very colinear with the observation effects (e.g., advertising and daily effects). Consequently, if the process variation explained most of the data, then advertising effects would be small, and the inverse was true. Thus, I am doubtful that time trends would be useful. But, I will include different models with time trends and see how they fit.
+
+### Summary
+
+We want to build models that have adstock for `The Rock` and `Radio Live`. The day of the week and whether it is a holiday also seem to be important variables. Time trends are unlikely, but it would be imprudent to not consider them, since we have time series data.
+
+## Models and cross validation
+
+Because we have time series data, we cannot arrange independence between observations. Thus, for cross-validation, I will consider two windows of time. The observations prior to a given window are taken as the training set and after taken as the test set.
+
+It is somewhat awkward finding the right partition of the data, because we have periods where there is no advertising, where there is only advertising on `The Rock`, and periods where we have advertising on both `The Rock` and `Radio Live`. Thus, naturally, training a model on no-advertising periods will lead to poor predictions for the upcoming periods with advertising. While training on periods with advertising for `The Rock` may not generalise to forecasts where we have advertising on `Radio Live`.
+
+As a first-order decision, I will choose the first window to end `r marketing[ test_window1 == FALSE ][1]$date`, and the second window to end `r marketing[ test_window2 == FALSE ][1]$date`. This is shown in the figure below. The first window was chosen to capture the no-advertising, `The Rock` advertising, and some of the `Radio Live`  period. 
+
+```{r echo=FALSE}
+par( mfrow = c(1,1))
+plot_PV( marketing, log = T )
+abline( v = marketing[ test_window1 == FALSE ][1]$date, col = "orange" )
+abline( v = marketing[ test_window2 == FALSE ][1]$date, col = "orange", lty = 2 )
+legend( x = "bottom", legend = c("Training set1", "Training set2"),
+    col = "orange", lty = c(1,2), bty = "n" )
+```
+
+Note that the test sets for `window1` and `window2` are not mutually exclusive. If we had `iid` data, then we would usually want the test sets to be mutually exclusive to get independence. But, since there is temporal autocorrelation, I am less worried about having mutually exclusive test sets.
+
+### Models
+
+We consider three types of models here, linear regression with a first order autoregressive term (`AR1`), a non-linear regression with adstock terms (`adstock`), and a regular linear regression. I have also considered versions of these models with extra `time` terms.
+
+The table below shows the test errors for each model (root-mean-squared-error). We see that adding the `time` term did improve the `AR1` model, but not the `adstock` or linear regression models. Overall, we see that the `adstock` model with no `time` trend tended to perform the best. So, I will use the `adstock`. 
+
+```{r echo=FALSE}
+load( "cv_results.RData" )
+CV_table = cv_results[ , list( CV, model, test_error ) ]
+
+CV_table = merge( CV_table[ CV == 1 ], CV_table[ CV == 2 ],
+    by = "model"
+)
+CV_table[ , c("CV.x", "CV.y") := NULL ]
+colnames(CV_table) = c("Model", "Training 1 test error", "Training 2 test error")
+CV_table
+```
+
+The `adstock` model has the following parameters:
+
+* Intercept
+* Day of the week (Sunday baseline)
+* Holiday effect (no holiday baseline)
+* Decay for `The Rock` adstock
+* Decay for `Radio Live` adstock
+* Effect for `The Rock` advertising
+* Effect for `Radio Live` advertising
+
+We assume that the advertising effects in the `adstock` model are strictly positive because unless the advertising campaign is particularly offensive, it should not decrease page views.
+
+The form of the mean of the log page views is linear in the terms above (except for `decay`). The distribution of the log page views is Gaussian with common variance.
+
+### Cross validation results in detail
+
+In situations like this, it is sometimes useful to examine the cross-validation results to understand why some models performed better than others. The two figures below show fits and predictions for the two training sets.
+
+In the first training set (`window1`), all of the models had some degree of over-prediction in the page views, except for the `adstock time` model, which had substantial under-predictions. The `time` terms on the linear and `AR1` models were very small. Therefore, the drop in page views in March could not be accounted for in the models. The `adstock time` model had a relatively large negative coefficient for time and thus was able to model the drop in page views in March.
+
+In the second training set, (`window2`), we see that all of the models tended to over-predict the page views in March. The `adstock` (no time) model tended to over-predict the least and thus had the best prediction error.
+
+```{r echo=FALSE, fig.height=10, fig.width=7}
+prediction_lines = function( marketing, cv_results, model_name, test_window, AR = FALSE ){
+    dates = marketing$date
+    if ( AR ){
+        dates = dates[-1]
+    }
+    lines(  dates,
+        cv_results[ CV == test_window & model == model_name ]$predictions[[1]],
+        col = "blue"
+    )
+}
+prediction_legend = function(){
+    legend( x = "bottom", legend = c("Training set ends", "Predictions"),
+        col = c("orange", "blue"), lty = c(1,1), bty = "n" )
+}
+
+test_window = 1
+test_start = marketing[ test_window1 == FALSE ][1]$date
+par( mfrow = c(3,2) )
+
+title = paste0("Adstock: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "adstock", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Adstock Time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "adstock_time", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("AR1: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "AR1", test_window, AR = TRUE )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("AR1 Time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "AR1_time", test_window, AR = TRUE )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Linear model: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "linear", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Linear model time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "linear_time", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+```
+
+```{r echo=FALSE, fig.height=10, fig.width=7}
+test_window = 2
+test_start = marketing[ test_window2 == FALSE ][1]$date
+par( mfrow = c(3,2) )
+
+title = paste0("Adstock: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "adstock", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Adstock Time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "adstock_time", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("AR1: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "AR1", test_window, AR = TRUE )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("AR1 Time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "AR1_time", test_window, AR = TRUE )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Linear model: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "linear", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+
+title = paste0("Linear model time: Training set", test_window)
+plot_PV( marketing, log = T, main = title )
+prediction_lines( marketing, cv_results, "linear_time", test_window )
+abline( v = test_start, col = "orange" )
+prediction_legend()
+```
+
+Given the results from the two training sets, it seems that there may be some structural change in the page views process after March. This could be mapped to an interaction, say between `time` and `adstock`. Alternatively, this could be part of an unobserved seasonal effect where job searches are higher in January/February than March. An indicator of this is the initial spike in page views in early January before any advertising was done.
+
+I elect not to add any other interactions and leave the March deficiencies in the model because the `adstock` model is, in my view, almost over-parameterised because we have two parameters (decay and ad effect) for both advertising sources. I also strongly suspect the March decline is an annual seasonal pattern.
+
+### Notes about non-linear regression
+
+The `adstock` model is a non-linear regression. It is non-linear in the effect of `decay`. This means that inference using the standard `t-`tests cannot be carried out on `decay` or on the advertising effects. It is possible to condition on a value of decay to construct a profile likelihood. However, I will choose a different approach.
+
+We know from the cross-validation that the `adstock` model is relatively good. Therefore, I will rewrite the `adstock` model as a Bayesian model. This allows us to conduct inference on any of the parameters by examining their posterior distributions. 
+
+I tried to use my domain knowledge to generate reasonable priors.
+
+* Weekday effects each have a  $N(0, 10^2)$ prior
+* Holiday effect has a $N(0, 1)$ prior
+* Advertising `The Rock` has $log N(0, 10^2$ prior
+* Advertising `Radio Live` has $log N(0, 10^2)$ prior
+* Decay `The Rock` has $Beta(10, 1)$ prior
+* Decay `Radio Live` has $Beta(10, 1)$ prior
+* Intercept has a $N(3, 10^2)$ prior
+
+Wide priors were chosen for weekday effects, advertising effects, and intercept because I thought the data would carry a lot of information about these parameters. 
+
+Advertising effects had log-Normal priors because of the positive constraint in the `adstock` model.
+
+The decay parameters were $Beta(10, 1)$. This is very skewed towards 1, as shown below. I chose a high decay prior because from inspection of the data, it appeared that the effect of advertising did not persist for very long. In addition, I expect radio advertisements to be more forgettable compared to television because people often listen to the radio in conjunction to doing other things, whereas television is a source of entertainment in itself. In addition, the relatively high concentration of the prior helps to constrain the model, since we have two parameters (`decay` and `effect`) for each advertising source.
+
+```{r echo=FALSE}
+hist( rbeta( 1e6, 10, 1 ) )
+```
+
+
+### Parameter estimates
+
+I ran a single MCMC chain for 100,000 iterations with 25 thinning. Mixing was fine from what I could tell. A table of 80% credible intervals are shown below. There are graphs in the executive summary, so I will not reproduce them here.
+
+```{r echo=FALSE}
+load( "bayes_model_fit.RData" )
+
+posterior_params = bayes_model_fit[ , {
+    mget( names(bayes_model_fit)[ !grepl( "PV_pred", names(bayes_model_fit) ) ] )
+    } ]
+posterior_params[ , rlive_effect := exp(rlive_effect) ]
+posterior_params[ , rock_effect := exp(rock_effect) ]
+credible_intervals = t( apply( posterior_params, 2, quantile, probs = c(0.1, 0.5, 0.9) ) )
+
+credible_intervals
+```
+
+`weekday_beta[1]` corresponds to Sunday, and is ordered through the week. 
+
+The posterior `decay` for `Radio Live` was not very different from the prior. Because the `Radio Live` decay is conditional on the `rlive_effect` and the `rlive_effect` was close to zero, the `decay` for `Radio Live` posterior in itself is not particularly significant.
+
+For each consecutive day, the effect of advertising on `Radio Live` decreased by `r round( credible_intervals["decay_rlive",2], 2 )`% on average. Each unit of adstock for `Radio Live` increased page views on average by `r round( credible_intervals["rlive_effect",2], 2 )` percent.
+
+Advertisements on `The Rock` were more persistent and had positive effects on the log page views. For each consecutive day, the effect of advertising on `The Rock` decreased by `r round(credible_intervals["decay_rock",2], 2 )`% on average. Each unit of adstock for `The Rock` increased page views on average by `r round( credible_intervals["rock_effect",2], 2 )` percent.
+
+We have very high certainty that advertising on `The Rock` was more effective than advertising on `Radio Live`. Estimated posterior probability of `The Rock` advertising being more effective is `r mean( posterior_params$rock_effect > posterior_params$rlive_effect )`.
+
+```{r echo=FALSE}
+wday_coef = round( exp( credible_intervals[ -(1:7),2] ), 2 )
+```
+
+Compared to Sunday, Monday had `r wday_coef[2]` times more views. Also compared to Sunday, Tuesday had `r wday_coef[3]` times more, Wednesday had `r wday_coef[4]` times more, Thursday had `r wday_coef[5]` times more, Friday had `r wday_coef[6]` times more, and Saturday had `r wday_coef[3]` fewer times the views. The posterior probabilities of the day effects being greater than zero is shown in the table below. We are very confident that page views are higher on weekdays than on the weekend.
+
+```{r echo=FALSE}
+wday_ = posterior_params[ , {
+    mget( names(bayes_model_fit)[ grepl( "weekday", names(bayes_model_fit) ) ] )
+} ]
+wday_mean0 = colMeans( wday_ > 0 )
+names(wday_mean0) = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+wday_mean0
+```
+
+On working holidays, the page views was `r round( exp( credible_intervals["holiday_beta",2] ), 2 )`% lower than not on holidays.
+
+Another question of interest is whether advertising is more effective on weekdays than weekends. There are multiple ways to answer this question. For example, we can compute a transformation of the posterior. That is, we marginalise out all effects and parameters other than the day effect and advertising on `The Rock` (we ignore advertising on `Radio Live` because it does not have a sizeable effect). Then, we adjust the posterior predicted log page views by the corresponding posterior day effect. This gives a posterior predicted weekday-adjusted log page views.
+
+```{r echo=FALSE}
+weekend = c("Sunday", "Saturday")
+marketing[ , id := 1:.N ]
+rock_ads = marketing[ Rock.Ads > 0 ]
+weekday_ads = rock_ads[ ! weekday %in% weekend ]
+weekend_ads = rock_ads[ weekday %in% weekend ]
+
+weekday_ads_posterior = bayes_model_fit[ , {
+    mget(paste0("PV_pred[", weekday_ads$id,"]"))
+} ]
+weekday_ads_posterior_day = bayes_model_fit[ , {
+    mget(paste0("weekday_beta[", as.numeric(weekday_ads$weekday),"]"))
+} ]
+weekday_ads_posterior_adj = weekday_ads_posterior - weekday_ads_posterior_day
+
+weekend_ads_posterior = bayes_model_fit[ , {
+    mget(paste0("PV_pred[", weekend_ads$id,"]"))
+} ]
+weekend_ads_posterior_day = bayes_model_fit[ , {
+    mget(paste0("weekday_beta[", as.numeric(weekend_ads$weekday),"]"))
+} ]
+weekend_ads_posterior_adj = weekend_ads_posterior - weekend_ads_posterior_day
+
+breaks_ = seq( 0, 15, by = 0.1 )
+hist( unlist(weekday_ads_posterior_adj), prob = T,
+    col = rgb(1, 0, 0, 0.25), border = rgb(1, 0, 0, 0.25), breaks = breaks_,
+    main = "Predicted page views adjusted for day",
+    xlab = "Predicted log page views")
+hist( unlist(weekend_ads_posterior_adj), add = T, prob = T,
+    col = rgb(0, 0, 1, 0.25), border = rgb(0, 0, 1, 0.25), breaks = breaks_ )
+legend( x = "topright",
+    title = "Advertising",
+    legend = c("Weekday", "Weekend"),
+    col = c("red", "blue"), bty = "n",
+    fill = c("red", "blue")
+)
+```
+
+The previous figure suggests that advertising on `The Rock` has the same effectiveness on both weekends and weekdays. However, we are predicting on the log scale. Therefore, there could be an interaction on the raw page views scale. There are some possibilities to marginalise and transform the posterior to get a handle on interactions on the raw page views, but none of them are very satisfactory, so I will just do a linear model (wrong model right reasons?).
+
+```{r echo=FALSE}
+marketing[ , weekend_ := weekday %in% c("Sunday", "Saturday") ]
+summary( lm( PV ~ weekend_ * Rock.Ads, data = marketing ) )
+```
+
+The significant interaction is strong evidence against the null hypothesis of no interaction. Therefore, advertising on the weekday has a larger benefit than advertising on the weekend. In retrospect, I probably should have used a generalised linear model so that I could test for the interaction. 
+
+End.
